@@ -1,26 +1,32 @@
 import {
   BadRequestException,
   Controller,
+  Get,
   HttpCode,
   Inject,
+  NotFoundException,
+  Param,
   Post,
+  ServiceUnavailableException,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { extname, join, parse, resolve } from 'path';
+import { basename, extname, join, parse } from 'path';
 import { diskStorage } from 'multer';
 import { randomUUID } from 'crypto';
 import { ImageJob } from './image-job';
 import { lastValueFrom } from 'rxjs';
 import { ClientProxy } from '@nestjs/microservices';
-
-const STORAGE_DIR =
-  process.env.STORAGE_DIR ?? resolve(process.cwd(), '../../storage');
+import { ImagesService } from './images.service';
+import { STORAGE_DIR } from './storage';
 
 @Controller('images')
 export class ImagesController {
-  constructor(@Inject('IMAGE_QUEUE') private readonly client: ClientProxy) {}
+  constructor(
+    @Inject('IMAGE_QUEUE') private readonly client: ClientProxy,
+    private readonly imagesService: ImagesService,
+  ) {}
 
   @Post()
   @HttpCode(202)
@@ -46,8 +52,36 @@ export class ImagesController {
       path: file.path,
       width: 300,
     };
-    await lastValueFrom(this.client.emit('image_resize', job));
+
+    this.imagesService.setStatus({ id: job.id, status: 'queued' });
+    try {
+      await lastValueFrom(this.client.emit('image_resize', job));
+    } catch (error) {
+      this.imagesService.setStatus({
+        id: job.id,
+        status: 'failed',
+        error: 'Could not queue a job.',
+      });
+      throw new ServiceUnavailableException('Could not queue a job.');
+    }
 
     return { id: job.id, status: 'queued' };
+  }
+
+  @Get(':id')
+  imageStatus(@Param('id') id: string) {
+    const status = this.imagesService.getStatus(id);
+
+    if (!status) {
+      throw new NotFoundException(`Image ${id} not found.`);
+    }
+
+    const { output, ...rest } = status;
+
+    if (!output) {
+      return rest;
+    }
+
+    return { ...rest, url: `/files/${basename(output)}` };
   }
 }
